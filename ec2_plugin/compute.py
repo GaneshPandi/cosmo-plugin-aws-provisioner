@@ -13,7 +13,6 @@
 #  * See the License for the specific language governing permissions and
 #  * limitations under the License.
 
-import time
 import copy
 import inspect
 import itertools
@@ -93,23 +92,22 @@ def start_new_server(ctx, ec2_client):
     try:
         s = ec2_client.run_instances(**params)
 
-        active_server = _wait_for_server_to_become_active(ec2_client, s)
-        ##Assign name to server
-        ec2_client.create_tags([active_server.id], {"Name": tag_name})
+        ###Assign name to server
+        ec2_client.create_tags([s.instances[0].id], {"Name": tag_name})
 
         meta_data = dict({})
         meta_data[NODE_ID_PROPERTY] = ctx.node_id
         meta_data = meta_data['cloudify_id']
-        ec2_client.create_tags([active_server.id], {"meta_data": meta_data})
+        ec2_client.create_tags([s.instances[0].id], {"meta_data": meta_data})
 
-        server_details = _get_server_status(ec2_client, active_server.id)
+        server_details = _get_server_status(ec2_client, s.instances[0].id)
         ctx.logger.info("Created VM with Parameters {0} Security_Group {1}."
                         .format(str(server_details),
                                 params['security_groups']))
 
     except Exception as e:
         raise RuntimeError("Boto bad request error: " + str(e))
-    ctx[AWS_SERVER_ID_PROPERTY] = active_server.id
+    ctx[AWS_SERVER_ID_PROPERTY] = s.instances[0].id
     ctx[AWS_SERVER_DETAILS] = server_details
 
 
@@ -135,12 +133,12 @@ def stop(ctx, ec2_client, **kwargs):
     """
     server = get_server_by_context(ec2_client, ctx)
     server_state = _get_server_status(ec2_client, server)
-    if server_state[0]['Status'] is "running":
-        ec2_client.stop_instances(server)
-    else:
+    if server is None:
         raise RuntimeError(
             "Cannot stop server - server doesn't exist for node: {0}"
             .format(ctx.node_id))
+    elif str(server_state[0]['Status']) == "running":
+        ec2_client.stop_instances(server)
 
 
 @operation
@@ -148,13 +146,13 @@ def stop(ctx, ec2_client, **kwargs):
 def delete(ctx, ec2_client, **kwargs):
     server = get_server_by_context(ec2_client, ctx)
     server_state = _get_server_status(ec2_client, server)
-    if server_state[0]['Status'] is "running" or \
-            server_state[0]['Status'] is "stopped":
-        ec2_client.terminate_instances(server)
-    else:
+    if server is None:
         raise RuntimeError(
             "Cannot delete server - server doesn't exist for node: {0}"
             .format(ctx.node_id))
+    elif str(server_state[0]['Status']) == "running" or \
+            str(server_state[0]['Status']) == "stopped":
+        ec2_client.terminate_instances(server)
 
 
 def get_server_by_context(ec2_client, ctx):
@@ -166,8 +164,9 @@ def get_server_by_context(ec2_client, ctx):
     """
     # Getting instance by its AWS instance id is faster tho it requires
     # a REST API call to Cloudify's storage for getting runtime properties.
-    if AWS_SERVER_ID_PROPERTY in ctx:
-        servers = ec2_client.get_only_instances(instance_ids=ctx[AWS_SERVER_ID_PROPERTY])
+    if ctx.runtime_properties in ctx:
+        servers = ec2_client.get_only_instances(
+            instance_ids=ctx.runtime_properties[AWS_SERVER_ID_PROPERTY])
         ctx.logger.debug('Node id {0} and {1}'.format(ctx.node_id, servers[0].id))
         return servers[0].id
     # Fallback
@@ -198,7 +197,7 @@ def get_state(ctx, ec2_client, **kwargs):
 def create_security_group(ctx, ec2_client, **kwargs):
 
     #Creates Security Group
-    security_group= {}
+    security_group = {}
     security_group.update(copy.deepcopy(ctx.properties['security_group']['create']))
     security_group_presence = _get_security_group_by_name(ec2_client,
                                                           security_group['name'])
@@ -245,10 +244,10 @@ def configure_security_group(ctx, ec2_client, **kwargs):
     security_group = {}
     security_group.update(copy.deepcopy(ctx.properties['security_group']['configure']))
     _fail_on_missing_required_parameters(security_group, ('name',
-                                                     'ip_protocol',
-                                                     'cidr_ip',
-                                                     'from_port',
-                                                     'to_port', ),
+                                                          'ip_protocol',
+                                                          'cidr_ip',
+                                                          'from_port',
+                                                          'to_port', ),
                                          'security_groups.configure')
     security_group_presence = _get_security_group_by_name(ec2_client,
                                                           security_group['name'])
@@ -288,18 +287,6 @@ def _get_server_status(ec2_client, server_id):
                     "Image Id": i.image_id, "Placement": i.placement,
                     "Key_Name": i.key_name, "Public IP": i.ip_address,
                     "Hardware id": server_id, "Private IP": i.private_ip_address}]
-
-
-def _wait_for_server_to_become_active(ec2_client, server):
-    timeout = 100
-    while server.instances[0].state != "running":
-        timeout -= 5
-        if timeout <= 0:
-            raise RuntimeError('Server failed to start in time')
-        time.sleep(5)
-        server = ec2_client.get_all_instances(instance_ids=str(server.instances[0].id))[0]
-
-    return server.instances[0]
 
 
 def _fail_on_missing_required_parameters(obj, required_parameters, hint_where):
