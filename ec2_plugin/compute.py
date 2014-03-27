@@ -58,8 +58,8 @@ def start_new_server(ctx, ec2_client):
 
     # Sugar
     if 'image_id' in server:
-        server['image_id'] = ec2_client.get_all_images(image_ids=server['image_id'])
-        params['image_id'] = server['image_id'][0].id
+        server['image_id'] = ec2_client.get_image(server['image_id'])
+        params['image_id'] = server['image_id'].id
         del server['image_id']
 
     tag_name = server['name']
@@ -134,23 +134,27 @@ def stop(ctx, ec2_client, **kwargs):
     for Instance store backed AMI  server.stop not supported"
     """
     server = get_server_by_context(ec2_client, ctx)
-    if server is None:
+    server_state = _get_server_status(ec2_client, server)
+    if server_state[0]['Status'] is "running":
+        ec2_client.stop_instances(server)
+    else:
         raise RuntimeError(
             "Cannot stop server - server doesn't exist for node: {0}"
             .format(ctx.node_id))
-    ec2_client.stop_instances(server)
 
 
 @operation
 @with_ec2_client
 def delete(ctx, ec2_client, **kwargs):
     server = get_server_by_context(ec2_client, ctx)
-    if server is None:
+    server_state = _get_server_status(ec2_client, server)
+    if server_state[0]['Status'] is "running" or \
+            server_state[0]['Status'] is "stopped":
+        ec2_client.terminate_instances(server)
+    else:
         raise RuntimeError(
             "Cannot delete server - server doesn't exist for node: {0}"
             .format(ctx.node_id))
-
-    ec2_client.terminate_instances(server)
 
 
 def get_server_by_context(ec2_client, ctx):
@@ -163,8 +167,7 @@ def get_server_by_context(ec2_client, ctx):
     # Getting instance by its AWS instance id is faster tho it requires
     # a REST API call to Cloudify's storage for getting runtime properties.
     if AWS_SERVER_ID_PROPERTY in ctx:
-        reservations = ec2_client.get_all_instances(instance_ids=ctx[AWS_SERVER_ID_PROPERTY])
-        servers = [i for r in reservations for i in r.instances]
+        servers = ec2_client.get_only_instances(instance_ids=ctx[AWS_SERVER_ID_PROPERTY])
         ctx.logger.debug('Node id {0} and {1}'.format(ctx.node_id, servers[0].id))
         return servers[0].id
     # Fallback
@@ -285,6 +288,18 @@ def _get_server_status(ec2_client, server_id):
                     "Image Id": i.image_id, "Placement": i.placement,
                     "Key_Name": i.key_name, "Public IP": i.ip_address,
                     "Hardware id": server_id, "Private IP": i.private_ip_address}]
+
+
+def _wait_for_server_to_become_active(ec2_client, server):
+    timeout = 100
+    while server.instances[0].state != "running":
+        timeout -= 5
+        if timeout <= 0:
+            raise RuntimeError('Server failed to start in time')
+        time.sleep(5)
+        server = ec2_client.get_all_instances(instance_ids=str(server.instances[0].id))[0]
+
+    return server.instances[0]
 
 
 def _fail_on_missing_required_parameters(obj, required_parameters, hint_where):
