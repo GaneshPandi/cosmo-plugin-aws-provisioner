@@ -12,10 +12,13 @@
 #  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  * See the License for the specific language governing permissions and
 #  * limitations under the License.
-
-from functools import wraps
-import json
 import os
+import json
+import string
+import random
+import logging
+import unittest
+from functools import wraps
 
 import boto.ec2 as aws_client
 
@@ -23,9 +26,6 @@ import cloudify.manager
 import cloudify.decorators
 
 PREFIX_RANDOM_CHARS = 3
-CLEANUP_RETRIES = 10
-CLEANUP_RETRY_SLEEP = 2
-
 
 class Config(object):
     def get(self):
@@ -67,23 +67,23 @@ class AwsClient(object):
         return ret
 
 
-# Clients acquireres
+# Clients acquirers
 
 class EC2Client(AwsClient):
 
     config = EC2Config
 
     def connect(self, cfg):
+        aws_cfg = cfg['Amazon Credentials']
         return aws_client.connect_to_region(
-            aws_access_key_id=cfg['aws_access_key'],
-            aws_secret_access_key=cfg['aws_secret_key'],
-            region_name=cfg['region'],
-            http_log_debug=False)
+            aws_access_key_id=aws_cfg['aws_access_key_id'],
+            aws_secret_access_key=aws_cfg['aws_secret_access_key'],
+            region_name=aws_cfg['region'])
 
 
 # Decorators
 
-def _find_instanceof_in_kw(cls, kw):
+def _find_instance_of_in_kw(cls, kw):
     ret = [v for v in kw.values() if isinstance(v, cls)]
     if not ret:
         return None
@@ -95,7 +95,7 @@ def _find_instanceof_in_kw(cls, kw):
 
 
 def _find_context_in_kw(kw):
-    return _find_instanceof_in_kw(cloudify.context.CloudifyContext, kw)
+    return _find_instance_of_in_kw(cloudify.context.CloudifyContext, kw)
 
 
 def with_ec2_client(f):
@@ -110,4 +110,56 @@ def with_ec2_client(f):
         kw['ec2_client'] = ec2_client
         return f(*args, **kw)
     return wrapper
+
+
+#TestCases
+class TestCase(unittest.TestCase):
+
+    def get_ec2_client(self):
+        r = EC2Client().get()
+        self.get_ec2_client = lambda: r
+        return self.get_ec2_client()
+
+    def _mock_send_event(self, *args, **kw):
+        self.logger.debug("_mock_send_event(args={0}, kw={1})".format(
+            args, kw))
+
+    def _mock_get_node_state(self, __cloudify_id, *args, **kw):
+        self.logger.debug(
+            "_mock_get_node_state(__cloudify_id={0} args={1}, kw={2})".format(
+                __cloudify_id, args, kw))
+        return self.nodes_data[__cloudify_id]
+
+    def setUp(self):
+        # Careful!
+        logger = logging.getLogger(__name__)
+        logging.basicConfig(
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        self.logger = logger
+        self.logger.level = logging.DEBUG
+        self.logger.debug("Cosmo test setUp() called")
+        chars = string.ascii_uppercase + string.digits
+        self.name_prefix = 'cosmo_test_{0}_'\
+            .format(''.join(
+                random.choice(chars) for x in range(PREFIX_RANDOM_CHARS)))
+        self.timeout = 120
+
+        self.logger.debug("Cosmo test setUp() done")
+
+    @with_ec2_client
+    def assertThereIsOneServerAndGet(self, ec2_client, **kw):
+        instances = ec2_client.get_all_instances()
+        instances = [i for r in instances for i in r.instances]
+        self.assertEquals(1, len(instances[0].tags['Name']))
+        return instances[0].tags['Name']
+
+    assertThereIsOneServer = assertThereIsOneServerAndGet
+
+    @with_ec2_client
+    def assertThereIsNoServer(self, ec2_client, **kw):
+        tags = ec2_client.get_all_tags()
+        for tag in tags:
+            if tag.name == 'Name':
+                if tag.value == kw['name']:
+                    self.assertEquals(0, len(tag.value))
 
